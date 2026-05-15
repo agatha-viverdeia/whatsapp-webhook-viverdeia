@@ -1,6 +1,7 @@
 import os
 import json
 import urllib.request
+from collections import deque
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -62,6 +63,9 @@ LEADS = {
     },
 }
 
+# Histórico de conversa por número (mantém os últimos 20 turnos = 10 trocas)
+HISTORICO = {}
+
 SYSTEM_PROMPT = """Você é a assistente de vendas da Agatha Teles, Closer da Viver de IA.
 Responda mensagens de WhatsApp de leads em negociação de forma personalizada, estratégica e humanizada.
 
@@ -73,28 +77,33 @@ Diretrizes:
 - Mensagens curtas (máximo 3 parágrafos)
 - Sem travessão, sem bullet points longos
 - Assine sempre como Agatha
+- Leve em conta todo o histórico da conversa para manter contexto e continuidade natural
 
 Se o lead perguntar sobre reagendamento, ofereça disponibilidade e peça para confirmar.
 Se demonstrar interesse, direcione para o próximo passo (reunião ou proposta).
-Se tiver objeção, acolha e redirecione com case ou insight relevante."""
+Se tiver objeção, acolha e redirecione com case ou insight relevante.
+Se for um lead desconhecido, trate como novo contato interessado em automação e IA para negócios."""
 
 
-def gerar_resposta(mensagem: str, lead: dict) -> str:
-    contexto = f"""
-Lead: {lead.get('nome', 'Lead')}
-Empresa: {lead.get('empresa', 'não informada')}
-Segmento: {lead.get('segmento', 'não informado')}
-Dores mapeadas: {lead.get('dores', 'não mapeadas')}
-Estágio no pipeline: {lead.get('estagio', 'indefinido')}
+def gerar_resposta(mensagem: str, lead: dict, historico: list) -> str:
+    contexto = (
+        f"Lead: {lead.get('nome') or 'Lead'}\n"
+        f"Empresa: {lead.get('empresa') or 'não informada'}\n"
+        f"Segmento: {lead.get('segmento') or 'não informado'}\n"
+        f"Dores mapeadas: {lead.get('dores') or 'não mapeadas'}\n"
+        f"Estágio no pipeline: {lead.get('estagio') or 'novo contato'}"
+    )
 
-Mensagem recebida: "{mensagem}"
-"""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"Contexto do lead:\n{contexto}"},
+    ]
+    messages.extend(historico)
+    messages.append({"role": "user", "content": mensagem})
+
     payload = {
         "model": "llama3-8b-8192",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": contexto}
-        ],
+        "messages": messages,
         "max_tokens": 400,
         "temperature": 0.7,
     }
@@ -142,8 +151,15 @@ def webhook():
         "estagio": "novo contato",
     })
 
+    if phone_clean not in HISTORICO:
+        HISTORICO[phone_clean] = deque(maxlen=20)
+
+    historico_atual = list(HISTORICO[phone_clean])
+
     try:
-        resposta = gerar_resposta(texto, lead)
+        resposta = gerar_resposta(texto, lead, historico_atual)
+        HISTORICO[phone_clean].append({"role": "user", "content": texto})
+        HISTORICO[phone_clean].append({"role": "assistant", "content": resposta})
         enviar_whatsapp(phone_clean, resposta)
         return jsonify({"status": "sent", "to": phone_clean}), 200
     except Exception as e:
